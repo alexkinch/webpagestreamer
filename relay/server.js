@@ -140,7 +140,9 @@ function startFFmpeg() {
     "-bufsize", "4000k",
     "-pix_fmt", "yuv420p",
     "-profile:v", "high",
+    "-x264opts", "repeat-headers=1",
     "-g", String(parseInt(FRAMERATE, 10) * 2), // GOP = 2 seconds
+    "-sar", "12:11", // PAL 4:3 sample aspect ratio
     // Audio: AAC
     "-c:a", "aac",
     "-b:a", "128k",
