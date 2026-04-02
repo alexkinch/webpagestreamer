@@ -142,7 +142,8 @@ function startFFmpeg() {
     "-profile:v", "high",
     "-x264opts", "repeat-headers=1",
     "-g", String(parseInt(FRAMERATE, 10) * 2), // GOP = 2 seconds
-    "-sar", "12:11", // PAL 4:3 sample aspect ratio
+    // Set PAL 4:3 SAR via video filter to avoid encoder/muxer mismatch
+    "-vf", `setsar=12/11`,
     // Audio: AAC
     "-c:a", "aac",
     "-b:a", "128k",
