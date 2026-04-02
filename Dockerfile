@@ -10,14 +10,7 @@ RUN apk add --no-cache \
     bash \
     curl \
     python3 \
-    py3-websockets \
-    # Fonts: Liberation family (metric-compatible with Arial, Times, Courier)
-    font-liberation \
-    # Noto fonts for broad coverage and good sans/serif defaults
-    font-noto \
-    font-noto-emoji \
-    fontconfig \
-    && fc-cache -f
+    py3-websockets
 
 WORKDIR /app
 
