@@ -20,28 +20,38 @@ echo "[start] URL=$URL"
 echo "[start] Resolution=${WIDTH}x${HEIGHT} @ ${FRAMERATE}fps"
 echo "[start] Output=$OUTPUT"
 
+# Extract the origin from the URL to allow insecure tabCapture on HTTP origins.
+# chrome.tabCapture requires HTTPS unless the origin is explicitly allowlisted.
+URL_ORIGIN=$(echo "$URL" | sed -E 's|(https?://[^/]+).*|\1|')
+UNSAFELY_ALLOW=""
+if echo "$URL_ORIGIN" | grep -q "^http://"; then
+    UNSAFELY_ALLOW="--unsafely-treat-insecure-origin-as-secure=${URL_ORIGIN}"
+    echo "[start] Allowing insecure origin for tabCapture: $URL_ORIGIN"
+fi
+
 # Write a Chrome launcher script that supervisord will run
-cat > /tmp/launch-chrome.sh <<'SCRIPT_END'
+cat > /tmp/launch-chrome.sh <<SCRIPT_END
 #!/bin/bash
-exec chromium \
-    --headless=new \
-    --no-sandbox \
-    --disable-gpu \
-    --disable-dev-shm-usage \
-    --disable-software-rasterizer \
-    --remote-debugging-port=${CDP_PORT} \
-    --remote-debugging-address=127.0.0.1 \
-    --load-extension=${EXTENSION_DIR} \
-    --disable-extensions-except=${EXTENSION_DIR} \
-    --allowlisted-extension-id=${EXTENSION_ID} \
-    --auto-accept-this-tab-capture \
-    --autoplay-policy=no-user-gesture-required \
-    --disable-background-timer-throttling \
-    --disable-backgrounding-occluded-windows \
-    --disable-renderer-backgrounding \
-    --window-size=${WIDTH},${HEIGHT} \
-    --user-data-dir=/tmp/chrome-profile \
-    "${URL}"
+exec chromium \\
+    --headless=new \\
+    --no-sandbox \\
+    --disable-gpu \\
+    --disable-dev-shm-usage \\
+    --disable-software-rasterizer \\
+    --remote-debugging-port=\${CDP_PORT} \\
+    --remote-debugging-address=127.0.0.1 \\
+    --load-extension=\${EXTENSION_DIR} \\
+    --disable-extensions-except=\${EXTENSION_DIR} \\
+    --allowlisted-extension-id=\${EXTENSION_ID} \\
+    --auto-accept-this-tab-capture \\
+    --autoplay-policy=no-user-gesture-required \\
+    --disable-background-timer-throttling \\
+    --disable-backgrounding-occluded-windows \\
+    --disable-renderer-backgrounding \\
+    --window-size=\${WIDTH},\${HEIGHT} \\
+    --user-data-dir=/tmp/chrome-profile \\
+    ${UNSAFELY_ALLOW} \\
+    "\${URL}"
 SCRIPT_END
 chmod +x /tmp/launch-chrome.sh
 
