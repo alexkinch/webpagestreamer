@@ -48,6 +48,7 @@ exec chromium \\
     --disable-background-timer-throttling \\
     --disable-backgrounding-occluded-windows \\
     --disable-renderer-backgrounding \\
+    --disable-features=PictureInPicture,MediaSessionService \\
     --window-size=\${WIDTH},\${HEIGHT} \\
     --user-data-dir=/tmp/chrome-profile \\
     ${UNSAFELY_ALLOW} \\

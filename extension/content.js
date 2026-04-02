@@ -11,6 +11,10 @@
     style.textContent = `
       html, body { overflow: hidden !important; }
       ::-webkit-scrollbar { display: none !important; }
+      video::-webkit-media-controls { display: none !important; }
+      video::-webkit-media-controls-overlay-play-button { display: none !important; }
+      video::-webkit-media-controls-enclosure { display: none !important; }
+      video::-internal-media-controls-overlay-cast-button { display: none !important; }
     `;
     document.documentElement.appendChild(style);
   }
