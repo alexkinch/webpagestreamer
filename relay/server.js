@@ -129,25 +129,21 @@ function startFFmpeg() {
   const args = [
     // Input: WebM from stdin
     "-i", "pipe:0",
-    // Video: H.264 software encode
-    "-c:v", "libx264",
-    "-preset", "ultrafast",
-    "-tune", "zerolatency",
+    // Video: MPEG-2 (standard for PAL DVB/analogue)
+    "-c:v", "mpeg2video",
     "-s", `${WIDTH}x${HEIGHT}`,
     "-r", FRAMERATE,
-    "-b:v", "2000k",
-    "-maxrate", "2000k",
-    "-bufsize", "4000k",
+    "-b:v", "5000k",
+    "-maxrate", "5000k",
+    "-bufsize", "2000k",
     "-pix_fmt", "yuv420p",
-    "-profile:v", "high",
-    "-x264opts", "repeat-headers=1",
-    "-g", String(parseInt(FRAMERATE, 10) * 2), // GOP = 2 seconds
-    // Set PAL 4:3 SAR via video filter to avoid encoder/muxer mismatch
-    // Scale down ~5% and pad to create overscan-safe area for analogue TV
-    "-vf", "setsar=12/11", // PAL 4:3 sample aspect ratio (ITU BT.601)
-    // Audio: AAC
-    "-c:a", "aac",
-    "-b:a", "128k",
+    "-g", String(parseInt(FRAMERATE, 10) / 2), // GOP = 0.5 seconds (fast channel join)
+    "-bf", "2",
+    "-flags", "+ilme+ildct",
+    "-vf", "setsar=12/11", // PAL 4:3 SAR (ITU BT.601)
+    // Audio: MPEG-2 layer 2 (standard for PAL broadcast)
+    "-c:a", "mp2",
+    "-b:a", "256k",
     "-ar", "48000",
     "-ac", "2",
     // Sync and format — output MPEG-TS to stdout
