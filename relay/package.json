@@ -1,0 +1,10 @@
+{
+  "name": "webpagestreamer-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebSocket-to-FFmpeg relay for tab capture streaming",
+  "main": "server.js",
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}

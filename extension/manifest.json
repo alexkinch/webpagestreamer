@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Tab Capture Streamer",
+  "version": "1.0",
+  "description": "Captures tab audio and video for MPEG-TS streaming",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3PSI6DR/mVNC7m3Xlh5xg9S5eD+3kAvDKcGhDwjUv/DUVqWDk6o7DWsAm1vmyejcP7wNnxg5pJwK4qiKYCMWzn7ia4STyVqJ3cy+HB7vfuFQf9axssvV/42PjG1ucBBorT5ok/VJJ3jLJmel/vTYfjUuOroNnnIfu24RJffbedfDv9wChpZEeGoc9BJXSn/r1gGU022TZ4ofZwGL+CigzUjdb8BRQqLQrH+LPo+H7IPXb8lj/vIrhMKjJ+uFt+v0nsPyy9JPUt/eK9ctbVOVynjsUpNUgiKHjkYlOLEVkMB/83MciA/YUOwz4qxFGnlxrGoLuE/jdNYx2YJ0imkKiQIDAQAB",
+  "permissions": [
+    "tabs",
+    "tabCapture",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
