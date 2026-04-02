@@ -14,14 +14,14 @@ Chromium (headless, with capture extension)
     │
     └── WebSocket ──► Relay server (Node.js)
                           │
-                          └── FFmpeg (H.264 + AAC ──► MPEG-TS)
+                          └── FFmpeg (MPEG-2 + MP2 ──► MPEG-TS)
                                   │
                                   └── UDP / TCP / file output
 ```
 
 1. **Chromium** launches headless with a built-in extension that captures the active tab's audio and video using `chrome.tabCapture`
 2. The **content script** records the media stream as WebM and sends chunks over WebSocket to a local relay server
-3. The **relay server** (Node.js) pipes the WebM data into **FFmpeg**, which transcodes to H.264/AAC MPEG-TS on stdout
+3. The **relay server** (Node.js) pipes the WebM data into **FFmpeg**, which transcodes to MPEG-2/MP2 MPEG-TS on stdout
 4. The relay's **output handler** forwards the MPEG-TS to the configured destination (UDP, TCP server, or file)
 5. **Supervisord** manages all processes (relay, Chrome, capture trigger) and restarts them on failure
 
@@ -127,10 +127,10 @@ ffplay /tmp/stream.ts
 
 ## FFmpeg encoding settings
 
-- **Video**: H.264 (libx264), ultrafast preset, zerolatency tune, 2 Mbps, High profile
-- **Audio**: AAC, 128 kbps, 48 kHz stereo
+- **Video**: MPEG-2 (mpeg2video), 5 Mbps, interlaced flags, SAR 12:11 (PAL 4:3)
+- **Audio**: MPEG-2 Layer 2 (MP2), 256 kbps, 48 kHz stereo
 - **Container**: MPEG-TS (mpegts)
-- **GOP**: 2 seconds (2 x framerate)
+- **GOP**: 0.5 seconds (fast channel joining)
 - **Pixel format**: yuv420p
 
 ## Project structure
@@ -160,8 +160,11 @@ ffplay /tmp/stream.ts
 
 **High latency**
 - The MediaRecorder uses a 20ms timeslice for low latency
-- FFmpeg uses `ultrafast` preset and `zerolatency` tune
 - Network conditions between the container and receiver affect end-to-end latency
+
+**HTTP URLs fail to capture (tabCapture error)**
+- Chrome's `tabCapture` API requires HTTPS. The container automatically allows insecure origins for `http://` URLs via `--unsafely-treat-insecure-origin-as-secure`
+- Content script also hides scrollbars and Chrome media overlay icons
 
 **UDP multicast not working**
 - Does not work on macOS Docker — use TCP for local testing

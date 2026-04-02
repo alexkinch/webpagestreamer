@@ -8,7 +8,7 @@ webpagestreamer is a Docker container that captures a web page from headless Chr
 
 Three processes run inside the container, managed by supervisord:
 
-1. **Relay server** (`relay/server.js`) — Node.js WebSocket server that receives WebM chunks from the extension and pipes them to FFmpeg. FFmpeg transcodes to H.264/AAC MPEG-TS and outputs to the configured destination. Starts first (priority 10).
+1. **Relay server** (`relay/server.js`) — Node.js WebSocket server that receives WebM chunks from the extension and pipes them to FFmpeg. FFmpeg transcodes to MPEG-2/MP2 MPEG-TS on stdout; the relay's output handler forwards it to the configured destination (UDP, TCP server, or file). Starts first (priority 10).
 
 2. **Chrome** (`start.sh` generates `/tmp/launch-chrome.sh`) — Headless Chromium with the capture extension loaded. Navigates to the configured URL. Starts second (priority 20).
 
@@ -44,7 +44,13 @@ All configurable via Docker env vars: `URL`, `OUTPUT`, `WIDTH`, `HEIGHT`, `FRAME
 Build and run locally:
 ```bash
 docker build -t webpagestreamer .
-docker run --rm -e URL="https://example.com" -e OUTPUT="udp://239.0.0.1:1234?pkt_size=1316" webpagestreamer
+docker run --rm -p 9876:9876 -e URL="https://example.com" -e OUTPUT="tcp://0.0.0.0:9876" webpagestreamer
+# Then: ffplay -f mpegts tcp://127.0.0.1:9876
+```
+
+Or use the test script:
+```bash
+./test.sh
 ```
 
 For debugging, use file output:
@@ -56,5 +62,9 @@ docker run --rm -v /tmp:/output -e URL="https://example.com" -e OUTPUT="/output/
 
 - The `forceFrames()` function in `content.js` is critical — without it Chrome may not render frames on static pages, producing a frozen stream.
 - The trigger script uses inline Python with the `websockets` library for CDP communication. The `python3-websockets` package must be installed in the container.
+- The trigger script sets the viewport to exactly WIDTHxHEIGHT via `Emulation.setDeviceMetricsOverride` before triggering capture. Without this, `--window-size` only sets the outer window, not the content viewport.
+- HTTP URLs require `--unsafely-treat-insecure-origin-as-secure` for `tabCapture` to work. `start.sh` detects `http://` URLs and adds this flag automatically.
+- The content script hides scrollbars (`overflow: hidden`) and Chrome media overlay icons (PiP, cast) to keep the captured output clean.
 - FFmpeg receives WebM on stdin and must handle the stream continuously — if the WebSocket disconnects and reconnects, FFmpeg gets a new WebM header which can cause errors. The relay server restarts FFmpeg when it exits.
+- FFmpeg outputs MPEG-2 video with SAR 12:11 (PAL 4:3) and MP2 audio. The `repeat-headers` x264 option is no longer relevant since we switched to MPEG-2, but the short GOP (0.5s) ensures fast channel joining for consumers like hacktv.
 - MediaRecorder timeslice is 20ms for low latency. Increasing this reduces CPU but adds latency.
