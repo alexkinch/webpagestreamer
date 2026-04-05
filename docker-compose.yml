@@ -7,8 +7,14 @@ services:
       - WIDTH=720
       - HEIGHT=576
       - FRAMERATE=25
-    # Uncomment for TCP output and expose the port:
-    # ports:
-    #   - "9876:9876"
+      # IPTV integration (XMLTV guide, M3U playlist, health check)
+      - CHANNEL_NAME=WebPageStreamer
+      - CHANNEL_ID=webpagestreamer.1
+      - PROGRAMME_TITLE=Live Stream
+      # - PROGRAMME_DESC=
+      # - STREAM_URL=              # Override auto-derived stream URL in playlist
+    ports:
+      - "9000:9000"               # HTTP + WebSocket (guide.xml, playlist.m3u, health)
+      # - "9876:9876"             # Uncomment for TCP stream output
     # Uncomment for host networking (needed for UDP multicast in some setups):
     # network_mode: host

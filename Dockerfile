@@ -34,6 +34,11 @@ ENV URL="https://www.google.com" \
     HEIGHT="576" \
     FRAMERATE="25" \
     WS_PORT="9000" \
-    CDP_PORT="9222"
+    CDP_PORT="9222" \
+    CHANNEL_NAME="WebPageStreamer" \
+    CHANNEL_ID="webpagestreamer.1" \
+    PROGRAMME_TITLE="Live Stream" \
+    PROGRAMME_DESC="" \
+    STREAM_URL=""
 
 ENTRYPOINT ["/app/start.sh"]

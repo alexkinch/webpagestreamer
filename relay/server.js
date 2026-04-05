@@ -1,7 +1,13 @@
 // WebSocket relay server: receives WebM chunks from the Chrome extension,
 // pipes them into FFmpeg (which encodes to MPEG-TS on stdout), and forwards
 // the MPEG-TS output to the configured destination (UDP, TCP, or file).
+//
+// Also serves IPTV integration endpoints:
+//   GET /guide.xml   — XMLTV electronic programme guide
+//   GET /playlist.m3u — M3U playlist for IPTV clients
+//   GET /health       — stream health check
 
+const http = require("http");
 const { spawn } = require("child_process");
 const { WebSocketServer } = require("ws");
 const dgram = require("dgram");
@@ -14,10 +20,16 @@ const OUTPUT = process.env.OUTPUT || "udp://239.0.0.1:1234?pkt_size=1316";
 const WIDTH = process.env.WIDTH || "720";
 const HEIGHT = process.env.HEIGHT || "576";
 const FRAMERATE = process.env.FRAMERATE || "25";
+const CHANNEL_NAME = process.env.CHANNEL_NAME || "WebPageStreamer";
+const CHANNEL_ID = process.env.CHANNEL_ID || "webpagestreamer.1";
+const PROGRAMME_TITLE = process.env.PROGRAMME_TITLE || "Live Stream";
+const PROGRAMME_DESC = process.env.PROGRAMME_DESC || "";
+const STREAM_URL = process.env.STREAM_URL || "";
 
 let ffmpeg = null;
 let ffmpegReady = false;
 let outputHandler = null;
+let wsConnected = false;
 
 // ---------------------------------------------------------------------------
 // Output handlers — FFmpeg writes MPEG-TS to stdout, we forward it here
@@ -198,16 +210,127 @@ function startFFmpeg() {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket server — receives WebM chunks from the Chrome extension
+// IPTV endpoints — XMLTV guide, M3U playlist, health check
 // ---------------------------------------------------------------------------
 
-function startWebSocketServer() {
-  const wss = new WebSocketServer({ port: WS_PORT }, () => {
-    console.log(`[relay] WebSocket server listening on port ${WS_PORT}`);
-  });
+function formatXMLTVDate(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    date.getUTCFullYear() +
+    pad(date.getUTCMonth() + 1) +
+    pad(date.getUTCDate()) +
+    pad(date.getUTCHours()) +
+    pad(date.getUTCMinutes()) +
+    pad(date.getUTCSeconds()) +
+    " +0000"
+  );
+}
+
+function escapeXML(str) {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function generateXMLTV() {
+  const now = new Date();
+  // Start 1 hour ago so current time always falls within a programme block
+  const start = new Date(now.getTime() - 60 * 60 * 1000);
+
+  let programmes = "";
+  for (let i = 0; i < 25; i++) {
+    const pStart = new Date(start.getTime() + i * 60 * 60 * 1000);
+    const pStop = new Date(start.getTime() + (i + 1) * 60 * 60 * 1000);
+    programmes += `  <programme start="${formatXMLTVDate(pStart)}" stop="${formatXMLTVDate(pStop)}" channel="${escapeXML(CHANNEL_ID)}">
+    <title lang="en">${escapeXML(PROGRAMME_TITLE)}</title>
+    <desc lang="en">${escapeXML(PROGRAMME_DESC)}</desc>
+  </programme>\n`;
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE tv SYSTEM "xmltv.dtd">
+<tv generator-info-name="webpagestreamer">
+  <channel id="${escapeXML(CHANNEL_ID)}">
+    <display-name>${escapeXML(CHANNEL_NAME)}</display-name>
+  </channel>
+${programmes}</tv>
+`;
+}
+
+function deriveStreamURL() {
+  if (STREAM_URL) return STREAM_URL;
+  // Derive from OUTPUT — for UDP multicast, prefix with @ for client join
+  if (OUTPUT.startsWith("udp://")) {
+    const parsed = new URL(OUTPUT);
+    return `udp://@${parsed.hostname}:${parsed.port}`;
+  }
+  if (OUTPUT.startsWith("tcp://")) {
+    const parsed = new URL(OUTPUT);
+    return `tcp://${parsed.hostname}:${parsed.port}`;
+  }
+  return OUTPUT;
+}
+
+function generateM3U() {
+  const streamUrl = deriveStreamURL();
+  return `#EXTM3U
+#EXTINF:-1 tvg-id="${CHANNEL_ID}" tvg-name="${CHANNEL_NAME}" group-title="${CHANNEL_NAME}",${CHANNEL_NAME}
+${streamUrl}
+`;
+}
+
+function handleHTTPRequest(req, res) {
+  if (req.method !== "GET") {
+    res.writeHead(405);
+    res.end();
+    return;
+  }
+
+  const pathname = url.parse(req.url).pathname;
+
+  if (pathname === "/guide.xml") {
+    res.writeHead(200, { "Content-Type": "application/xml" });
+    res.end(generateXMLTV());
+    return;
+  }
+
+  if (pathname === "/playlist.m3u") {
+    res.writeHead(200, { "Content-Type": "audio/x-mpegurl" });
+    res.end(generateM3U());
+    return;
+  }
+
+  if (pathname === "/health") {
+    const healthy = ffmpegReady && wsConnected && outputHandler !== null;
+    const body = JSON.stringify({
+      status: healthy ? "healthy" : "unhealthy",
+      ffmpeg: ffmpegReady,
+      websocket: wsConnected,
+      output: OUTPUT,
+    });
+    res.writeHead(healthy ? 200 : 503, { "Content-Type": "application/json" });
+    res.end(body);
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket + HTTP server
+// ---------------------------------------------------------------------------
+
+function startServer() {
+  const httpServer = http.createServer(handleHTTPRequest);
+
+  const wss = new WebSocketServer({ server: httpServer });
 
   wss.on("connection", (socket) => {
     console.log("[relay] extension connected");
+    wsConnected = true;
 
     socket.on("message", (data, isBinary) => {
       if (isBinary && ffmpegReady && ffmpeg && ffmpeg.stdin.writable) {
@@ -217,11 +340,19 @@ function startWebSocketServer() {
 
     socket.on("close", () => {
       console.log("[relay] extension disconnected");
+      wsConnected = wss.clients.size > 0;
     });
 
     socket.on("error", (err) => {
       console.error("[relay] WebSocket error:", err.message);
     });
+  });
+
+  httpServer.listen(WS_PORT, () => {
+    console.log(`[relay] WebSocket + HTTP server listening on port ${WS_PORT}`);
+    console.log(`[relay]   GET /guide.xml   — XMLTV programme guide`);
+    console.log(`[relay]   GET /playlist.m3u — M3U playlist`);
+    console.log(`[relay]   GET /health       — health check`);
   });
 }
 
@@ -231,4 +362,4 @@ function startWebSocketServer() {
 
 outputHandler = createOutputHandler(OUTPUT);
 startFFmpeg();
-startWebSocketServer();
+startServer();
