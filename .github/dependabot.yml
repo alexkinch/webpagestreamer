@@ -1,28 +1,54 @@
 version: 2
 updates:
+  # Relay npm deps - ws lib is shipped in the image, so treat bumps as fix.
   - package-ecosystem: npm
     directory: /relay
     schedule:
       interval: weekly
+      day: monday
     open-pull-requests-limit: 5
+    groups:
+      relay-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
     commit-message:
-      prefix: "deps"
+      prefix: "fix"
       include: scope
 
+  # Docker base image - alpine bumps = new chromium/ffmpeg/openssl, treat as fix.
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+      day: monday
     open-pull-requests-limit: 5
+    groups:
+      docker-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
     commit-message:
-      prefix: "deps"
+      prefix: "fix"
       include: scope
 
+  # GitHub Actions - CI-only, no image impact, don't cut releases.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+      day: monday
     open-pull-requests-limit: 5
+    groups:
+      actions-dependencies:
+        patterns:
+          - "*"
     commit-message:
       prefix: "ci"
       include: scope
