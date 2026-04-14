@@ -1,7 +1,11 @@
 .git
+.github
+.claude
+.gitignore
 node_modules
 README.md
 AGENTS.md
+CHANGELOG.md
 LICENSE
 docker-compose.yml
 test.sh
