@@ -1,0 +1,4 @@
+ignored:
+  # DL3018: Pinning apk package versions fights Alpine's release cadence;
+  # the base image tag (alpine:3.21) already pins the package set.
+  - DL3018
