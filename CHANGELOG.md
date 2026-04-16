@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/alexkinch/webpagestreamer/compare/v0.2.0...v0.2.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* **relay:** derive M3U stream URL from request Host header ([#16](https://github.com/alexkinch/webpagestreamer/issues/16)) ([0611c66](https://github.com/alexkinch/webpagestreamer/commit/0611c6663b946cb28a39154473a50169c24fbb1d))
+
 ## [0.2.0](https://github.com/alexkinch/webpagestreamer/compare/v0.1.0...v0.2.0) (2026-04-16)
 
 
