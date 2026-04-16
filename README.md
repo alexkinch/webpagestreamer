@@ -64,7 +64,7 @@ docker compose up --build
 | Variable    | Default                                    | Description                              |
 |-------------|--------------------------------------------|------------------------------------------|
 | `URL`       | `https://www.google.com`                   | Web page to capture                      |
-| `OUTPUT`    | `udp://239.0.0.1:1234`                    | Output destination (UDP, TCP, or file)   |
+| `OUTPUT`    | `udp://239.0.0.1:1234`                    | Output destination (UDP, RTP, TCP, or file) |
 | `WIDTH`     | `720`                                      | Capture width in pixels                  |
 | `HEIGHT`    | `576`                                      | Capture height in pixels (PAL: 576)      |
 | `FRAMERATE` | `25`                                       | Frames per second (PAL: 25)              |
@@ -73,7 +73,7 @@ docker compose up --build
 
 ## Output destinations
 
-The `OUTPUT` variable supports three transport types:
+The `OUTPUT` variable supports four transport types:
 
 ### TCP (recommended for local testing)
 
@@ -110,6 +110,24 @@ docker run --rm --network host \
 ```
 
 > **Note:** UDP multicast does not work from Docker on macOS because Docker Desktop runs inside a Linux VM that doesn't route multicast to the host. Use TCP for local testing on Mac, or `--network host` on a Linux host.
+
+### RTP (MPEG-TS over RTP)
+
+MPEG-TS encapsulated in RTP per RFC 2250 (payload type 33). Use this for receivers that expect RTP framing, such as [mptsd](https://github.com/gfto/mptsd) and some professional IPTV gateways.
+
+```bash
+# Unicast RTP to an mptsd input
+docker run --rm \
+  -e URL="https://example.com" \
+  -e OUTPUT="rtp://192.168.1.100:5004" \
+  webpagestreamer
+
+# Play with ffplay/VLC
+ffplay -f rtp -i rtp://@:5004
+vlc rtp://@:5004
+```
+
+Each RTP packet carries up to 7 TS packets (1316 bytes payload + 12-byte RTP header = 1328 bytes, safely under the 1500-byte MTU). Multicast addresses (224.0.0.0/4) are auto-detected and sent with TTL=4.
 
 ### File
 
