@@ -1,6 +1,6 @@
 // WebSocket relay server: receives WebM chunks from the Chrome extension,
 // pipes them into FFmpeg (which encodes to MPEG-TS on stdout), and forwards
-// the MPEG-TS output to the configured destination (UDP, TCP, or file).
+// the MPEG-TS output to the configured destination (UDP, RTP, TCP, or file).
 //
 // Also serves IPTV integration endpoints:
 //   GET /guide.xml   — XMLTV electronic programme guide
@@ -14,6 +14,7 @@ const dgram = require("dgram");
 const net = require("net");
 const fs = require("fs");
 const url = require("url");
+const crypto = require("crypto");
 
 const WS_PORT = parseInt(process.env.WS_PORT || "9000", 10);
 const OUTPUT = process.env.OUTPUT || "udp://239.0.0.1:1234?pkt_size=1316";
@@ -95,12 +96,21 @@ let wsConnected = false;
 
 function parseOutput(outputStr) {
   // UDP:  udp://host:port?opts
+  // RTP:  rtp://host:port   (MPEG-TS over RTP, RFC 2250, PT=33)
   // TCP:  tcp://host:port?opts
   // File: /path/to/file.ts
   if (outputStr.startsWith("udp://")) {
     const parsed = new URL(outputStr);
     return {
       type: "udp",
+      host: parsed.hostname,
+      port: parseInt(parsed.port, 10),
+    };
+  }
+  if (outputStr.startsWith("rtp://")) {
+    const parsed = new URL(outputStr);
+    return {
+      type: "rtp",
       host: parsed.hostname,
       port: parseInt(parsed.port, 10),
     };
@@ -137,6 +147,40 @@ function createOutputHandler(outputStr) {
         for (let i = 0; i < chunk.length; i += PKT_SIZE) {
           const pkt = chunk.slice(i, Math.min(i + PKT_SIZE, chunk.length));
           socket.send(pkt, config.port, config.host);
+        }
+      },
+      close() {
+        socket.close();
+      },
+    };
+  }
+
+  if (config.type === "rtp") {
+    // MPEG-TS over RTP per RFC 2250: 12-byte RTP header + up to 7 TS packets.
+    const socket = dgram.createSocket("udp4");
+    const firstOctet = parseInt(config.host.split(".")[0], 10);
+    if (firstOctet >= 224 && firstOctet <= 239) {
+      socket.bind(0, () => {
+        socket.setMulticastTTL(4);
+      });
+    }
+    const ssrc = crypto.randomBytes(4).readUInt32BE(0);
+    let seq = crypto.randomBytes(2).readUInt16BE(0);
+    const PKT_SIZE = 1316; // 7 × 188 = max TS payload that fits under 1500 MTU
+    console.log(`[output] RTP → ${config.host}:${config.port} (PT=33, SSRC=0x${ssrc.toString(16)})`);
+    return {
+      write(chunk) {
+        for (let i = 0; i < chunk.length; i += PKT_SIZE) {
+          const payload = chunk.slice(i, Math.min(i + PKT_SIZE, chunk.length));
+          const header = Buffer.alloc(12);
+          header[0] = 0x80;           // V=2, P=0, X=0, CC=0
+          header[1] = 33;             // M=0, PT=33 (MP2T)
+          header.writeUInt16BE(seq & 0xffff, 2);
+          // 90 kHz wall-clock timestamp; wraps naturally at u32
+          header.writeUInt32BE(((Date.now() * 90) >>> 0), 4);
+          header.writeUInt32BE(ssrc, 8);
+          seq = (seq + 1) & 0xffff;
+          socket.send(Buffer.concat([header, payload]), config.port, config.host);
         }
       },
       close() {
@@ -368,6 +412,10 @@ function deriveStreamURL() {
   if (OUTPUT.startsWith("udp://")) {
     const parsed = new URL(OUTPUT);
     return `udp://@${parsed.hostname}:${parsed.port}`;
+  }
+  if (OUTPUT.startsWith("rtp://")) {
+    const parsed = new URL(OUTPUT);
+    return `rtp://@${parsed.hostname}:${parsed.port}`;
   }
   if (OUTPUT.startsWith("tcp://")) {
     const parsed = new URL(OUTPUT);
