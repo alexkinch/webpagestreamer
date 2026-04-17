@@ -72,9 +72,21 @@ if echo "$URL_ORIGIN" | grep -q "^http://"; then
     echo "[start] Allowing insecure origin for tabCapture: $URL_ORIGIN"
 fi
 
-# Chrome launcher
+# Chrome launcher. Waits for the relay HTTP port and mediamtx RTSP port
+# to be listening before launching chromium — otherwise Chrome may hit
+# the target URL before the relay has bound its socket and bounce to a
+# chrome-error:// page that never recovers.
 cat > /tmp/launch-chrome.sh <<SCRIPT_END
 #!/bin/bash
+echo "[chrome] waiting for relay :\${HTTP_PORT} and mediamtx :8554..."
+for _ in \$(seq 1 60); do
+    if (echo > /dev/tcp/127.0.0.1/\${HTTP_PORT}) 2>/dev/null \\
+       && (echo > /dev/tcp/127.0.0.1/8554) 2>/dev/null; then
+        echo "[chrome] dependencies ready"
+        break
+    fi
+    sleep 0.5
+done
 exec chromium \\
     --headless=new \\
     --no-sandbox \\
