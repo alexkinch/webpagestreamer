@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/alexkinch/webpagestreamer/compare/v0.2.1...v0.2.2) (2026-04-17)
+
+
+### Bug Fixes
+
+* **relay:** replace single-shot A/V sync with wallclock + aresample ([#18](https://github.com/alexkinch/webpagestreamer/issues/18)) ([3de4654](https://github.com/alexkinch/webpagestreamer/commit/3de46542425fed532bfedf6a9a18f47aaef81583))
+
 ## [0.2.1](https://github.com/alexkinch/webpagestreamer/compare/v0.2.0...v0.2.1) (2026-04-16)
 
 
