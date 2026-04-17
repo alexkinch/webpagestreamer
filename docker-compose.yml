@@ -3,7 +3,7 @@ services:
     build: .
     environment:
       - URL=https://www.google.com
-      - OUTPUT=udp://239.0.0.1:1234
+      - UDP_OUTPUT=udp://239.0.0.1:1234
       - PROFILE=pal                # pal | ntsc | 720p | 1080p | hls
       # - WIDTH=720                # Override profile resolution
       # - HEIGHT=576
