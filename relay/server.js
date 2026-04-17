@@ -269,7 +269,9 @@ function createOutputHandler(outputStr) {
 function buildFFmpegArgs() {
   const gop = String(Math.round(parseFloat(FRAMERATE) / 2));
   const args = [
-    // Input: WebM from stdin
+    // Input: WebM from stdin. MediaRecorder timestamps jitter; stamp each
+    // chunk by arrival time so A/V stays locked to a stable clock.
+    "-use_wallclock_as_timestamps", "1",
     "-i", "pipe:0",
     // Video
     "-c:v", VIDEO_CODEC,
@@ -296,16 +298,18 @@ function buildFFmpegArgs() {
   // Sample aspect ratio
   args.push("-vf", `setsar=${SAR}`);
 
-  // Audio
+  // Audio. aresample=async=1000 continuously corrects drift up to 1s by
+  // stretching/compressing — replaces the deprecated single-shot "-async 1".
   args.push(
     "-c:a", AUDIO_CODEC,
     "-b:a", AUDIO_BITRATE,
     "-ar", "48000",
     "-ac", "2",
+    "-af", "aresample=async=1000",
   );
 
-  // Sync
-  args.push("-fps_mode", "cfr", "-async", "1");
+  // Sync: force constant frame rate so the MPEG-TS muxer gets predictable timing
+  args.push("-fps_mode", "cfr");
 
   // Output format
   if (FORMAT === "hls") {
