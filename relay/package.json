@@ -2,9 +2,10 @@
   "name": "webpagestreamer-relay",
   "version": "1.0.0",
   "private": true,
-  "description": "WebSocket-to-FFmpeg relay for tab capture streaming",
+  "description": "Orchestrator for MPEG-TS transcoding from mediamtx RTSP ingest",
   "main": "server.js",
-  "dependencies": {
-    "ws": "^8.16.0"
-  }
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {}
 }
