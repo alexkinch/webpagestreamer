@@ -1,4 +1,4 @@
-FROM alpine:3.21
+FROM alpine:3.23
 
 # Install dependencies: Chromium, FFmpeg, Node.js, supervisor, Python/websockets
 RUN apk add --no-cache \
