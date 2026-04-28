@@ -92,33 +92,85 @@
     return buf.buffer;
   }
 
+  function startVideoSender(ws, framerate) {
+    const frameIntervalMs = 1000 / framerate;
+    let latestFrame = null;
+    let droppedDueToBackpressure = 0;
+
+    const timer = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        clearInterval(timer);
+        return;
+      }
+      if (!latestFrame) return;
+      if (ws.bufferedAmount > latestFrame.byteLength * 2) {
+        droppedDueToBackpressure++;
+        if (droppedDueToBackpressure === 1 || droppedDueToBackpressure % 25 === 0) {
+          console.warn(`[capture] WS video backpressure — holding latest frame (count=${droppedDueToBackpressure})`);
+        }
+        return;
+      }
+      ws.send(latestFrame);
+    }, frameIntervalMs);
+
+    ws.addEventListener("close", () => clearInterval(timer), { once: true });
+    return {
+      update(frameBuffer) {
+        latestFrame = frameBuffer;
+      },
+      stop() {
+        clearInterval(timer);
+      },
+    };
+  }
+
   // Pump VideoFrames → WS until the WS closes or the track ends.
-  // Returns when the loop exits so the caller can re-open and re-pump.
-  async function pumpVideo(track, ws, mySession) {
+  // The sender emits exactly FRAMERATE frames/second, duplicating the newest
+  // rendered frame as needed. That keeps ffmpeg's rawvideo frame-count clock
+  // aligned with wall time instead of browser rendering cadence.
+  async function pumpVideo(track, ws, mySession, framerate) {
     const proc = new MediaStreamTrackProcessor({ track });
     const reader = proc.readable.getReader();
-    let droppedDueToBackpressure = 0;
+    const sender = startVideoSender(ws, framerate);
     try {
       while (mySession === videoSession && ws.readyState === WebSocket.OPEN) {
         const { value: frame, done } = await reader.read();
         if (done) break;
         try {
-          if (ws.bufferedAmount > 8 * 1024 * 1024) {
-            droppedDueToBackpressure++;
-            if (droppedDueToBackpressure === 1 || droppedDueToBackpressure % 25 === 0) {
-              console.warn(`[capture] WS video backpressure — dropping frame (count=${droppedDueToBackpressure})`);
-            }
-          } else {
-            const ab = await packI420(frame);
-            ws.send(ab);
-          }
+          const ab = await packI420(frame);
+          sender.update(ab);
         } finally {
           frame.close();
         }
       }
     } finally {
+      sender.stop();
       try { reader.cancel(); } catch (e) {}
     }
+  }
+
+  function copyAudioToInterleavedF32(chunk) {
+    const frames = chunk.numberOfFrames;
+    const channels = chunk.numberOfChannels;
+    const interleaved = new Float32Array(frames * channels);
+
+    if (chunk.format && chunk.format.endsWith("-planar")) {
+      const planes = [];
+      for (let channel = 0; channel < channels; channel++) {
+        const plane = new Float32Array(frames);
+        chunk.copyTo(plane, { planeIndex: channel });
+        planes.push(plane);
+      }
+      for (let frame = 0; frame < frames; frame++) {
+        for (let channel = 0; channel < channels; channel++) {
+          interleaved[frame * channels + channel] = planes[channel][frame];
+        }
+      }
+    } else {
+      chunk.copyTo(interleaved, { planeIndex: 0 });
+    }
+
+    return interleaved.buffer;
   }
 
   async function pumpAudio(track, ws, mySession) {
@@ -129,10 +181,7 @@
         const { value: chunk, done } = await reader.read();
         if (done) break;
         try {
-          const samples = chunk.numberOfFrames * chunk.numberOfChannels;
-          const buf = new Float32Array(samples);
-          chunk.copyTo(buf, { planeIndex: 0, format: "f32" });
-          ws.send(buf.buffer);
+          ws.send(copyAudioToInterleavedF32(chunk));
         } finally {
           chunk.close();
         }
@@ -143,13 +192,13 @@
   }
 
   // (Re)open the video WS and pump until it closes; then loop again.
-  async function videoLoop(track, vURL) {
+  async function videoLoop(track, vURL, framerate) {
     while (true) {
       const mySession = ++videoSession;
       const ws = await openWS(vURL);
       console.log("[capture] video WS connected");
       ws.addEventListener("close", () => console.log("[capture] video WS closed — will reconnect"));
-      await pumpVideo(track, ws, mySession);
+      await pumpVideo(track, ws, mySession, framerate);
       // Either the WS closed or the track ended. If track ended, exit.
       if (track.readyState === "ended") {
         console.warn("[capture] video track ended — bailing out of loop");
@@ -194,7 +243,7 @@
 
     console.log(`[capture] starting pumps — ${width}x${height}@${framerate}fps → ws://${relayHost}/ingest/*`);
 
-    videoLoop(vTrack, vURL).catch((e) => console.error("[capture] videoLoop fatal:", e));
+    videoLoop(vTrack, vURL, framerate).catch((e) => console.error("[capture] videoLoop fatal:", e));
     audioLoop(aTrack, aURL).catch((e) => console.error("[capture] audioLoop fatal:", e));
   }
 

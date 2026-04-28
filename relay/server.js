@@ -39,13 +39,17 @@ const PROFILES = {
     width: 720, height: 576, framerate: 25,
     videoCodec: "mpeg2video", audioCodec: "mp2",
     videoBitrate: "5000k", audioBitrate: "256k",
-    sar: "12/11", interlaced: true, format: "mpegts",
+    // Source is inherently progressive (Chromium renders full frames at
+    // the requested rate). Encoding interlaced from a progressive source
+    // produces field-pair flicker on bob-deinterlacing players. Default
+    // off; set INTERLACED=true if you specifically need broadcast PAL.
+    sar: "12/11", interlaced: false, format: "mpegts",
   },
   ntsc: {
     width: 720, height: 480, framerate: 29.97,
     videoCodec: "mpeg2video", audioCodec: "mp2",
     videoBitrate: "5000k", audioBitrate: "256k",
-    sar: "10/11", interlaced: true, format: "mpegts",
+    sar: "10/11", interlaced: false, format: "mpegts",
   },
   "720p": {
     width: 1280, height: 720, framerate: 30,
@@ -76,10 +80,12 @@ if (!PROFILES[PROFILE]) {
 const WIDTH = process.env.WIDTH || String(baseProfile.width);
 const HEIGHT = process.env.HEIGHT || String(baseProfile.height);
 const FRAMERATE = process.env.FRAMERATE || String(baseProfile.framerate);
+const VIDEO_FRAME_SIZE = parseInt(WIDTH, 10) * parseInt(HEIGHT, 10) * 3 / 2;
 const VIDEO_CODEC = process.env.VIDEO_CODEC || baseProfile.videoCodec;
 const AUDIO_CODEC = process.env.AUDIO_CODEC || baseProfile.audioCodec;
 const VIDEO_BITRATE = process.env.VIDEO_BITRATE || baseProfile.videoBitrate;
 const AUDIO_BITRATE = process.env.AUDIO_BITRATE || baseProfile.audioBitrate;
+const B_FRAMES = process.env.B_FRAMES || "0";
 const SAR = process.env.SAR || baseProfile.sar;
 const INTERLACED = process.env.INTERLACED
   ? process.env.INTERLACED === "true"
@@ -105,6 +111,23 @@ const httpStreamClients = new Set();
 // ---------------------------------------------------------------------------
 // Output handlers — FFmpeg writes MPEG-TS to stdout, we forward it here
 // ---------------------------------------------------------------------------
+
+function createTSPacketizer(sendPayload) {
+  const TS_PACKET_SIZE = 188;
+  const MAX_PAYLOAD_SIZE = TS_PACKET_SIZE * 7;
+  let carry = Buffer.alloc(0);
+
+  return {
+    write(chunk) {
+      const data = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk;
+      const alignedLength = data.length - (data.length % TS_PACKET_SIZE);
+      for (let i = 0; i < alignedLength; i += MAX_PAYLOAD_SIZE) {
+        sendPayload(data.subarray(i, Math.min(i + MAX_PAYLOAD_SIZE, alignedLength)));
+      }
+      carry = data.subarray(alignedLength);
+    },
+  };
+}
 
 function parseOutput(outputStr) {
   // UDP:  udp://host:port?opts
@@ -156,14 +179,12 @@ function createOutputHandler(outputStr) {
       });
     }
     console.log(`[output] UDP → ${config.host}:${config.port}`);
+    const packetizer = createTSPacketizer((payload) => {
+      socket.send(payload, config.port, config.host);
+    });
     return {
       write(chunk) {
-        // MPEG-TS packets are 188 bytes; send in TS-aligned chunks
-        const PKT_SIZE = 1316; // 7 x 188
-        for (let i = 0; i < chunk.length; i += PKT_SIZE) {
-          const pkt = chunk.slice(i, Math.min(i + PKT_SIZE, chunk.length));
-          socket.send(pkt, config.port, config.host);
-        }
+        packetizer.write(chunk);
       },
       close() {
         socket.close();
@@ -182,22 +203,21 @@ function createOutputHandler(outputStr) {
     }
     const ssrc = crypto.randomBytes(4).readUInt32BE(0);
     let seq = crypto.randomBytes(2).readUInt16BE(0);
-    const PKT_SIZE = 1316; // 7 × 188 = max TS payload that fits under 1500 MTU
     console.log(`[output] RTP → ${config.host}:${config.port} (PT=33, SSRC=0x${ssrc.toString(16)})`);
+    const packetizer = createTSPacketizer((payload) => {
+      const header = Buffer.alloc(12);
+      header[0] = 0x80;           // V=2, P=0, X=0, CC=0
+      header[1] = 33;             // M=0, PT=33 (MP2T)
+      header.writeUInt16BE(seq & 0xffff, 2);
+      // 90 kHz wall-clock timestamp; wraps naturally at u32
+      header.writeUInt32BE(((Date.now() * 90) >>> 0), 4);
+      header.writeUInt32BE(ssrc, 8);
+      seq = (seq + 1) & 0xffff;
+      socket.send(Buffer.concat([header, payload]), config.port, config.host);
+    });
     return {
       write(chunk) {
-        for (let i = 0; i < chunk.length; i += PKT_SIZE) {
-          const payload = chunk.slice(i, Math.min(i + PKT_SIZE, chunk.length));
-          const header = Buffer.alloc(12);
-          header[0] = 0x80;           // V=2, P=0, X=0, CC=0
-          header[1] = 33;             // M=0, PT=33 (MP2T)
-          header.writeUInt16BE(seq & 0xffff, 2);
-          // 90 kHz wall-clock timestamp; wraps naturally at u32
-          header.writeUInt32BE(((Date.now() * 90) >>> 0), 4);
-          header.writeUInt32BE(ssrc, 8);
-          seq = (seq + 1) & 0xffff;
-          socket.send(Buffer.concat([header, payload]), config.port, config.host);
-        }
+        packetizer.write(chunk);
       },
       close() {
         socket.close();
@@ -279,20 +299,22 @@ function buildFFmpegArgs() {
   const args = [
     "-fflags", "+genpts",
 
-    // Raw I420 video pipe — ffmpeg paces by -framerate.
+    // Raw I420 video pipe. PTS derives from -framerate (sample-count clock).
+    // Don't use -use_wallclock_as_timestamps here: it stamps PTS with unix
+    // wall-time (~1.7e9) while PCR starts near zero, causing players to
+    // buffer waiting for PCR to catch up.
     "-f", "rawvideo",
     "-pix_fmt", "yuv420p",
     "-s", `${WIDTH}x${HEIGHT}`,
     "-framerate", String(FRAMERATE),
-    "-thread_queue_size", "1024",
+    "-thread_queue_size", "64",
     "-i", VIDEO_FIFO,
 
-    // Raw f32le audio pipe at 44.1 kHz (browser default). The encoder's
-    // -ar 48000 below makes ffmpeg resample on the fly.
+    // Raw f32le audio pipe at 44.1 kHz. Encoder's -ar 48000 below resamples.
     "-f", "f32le",
     "-ar", "44100",
     "-ac", "2",
-    "-thread_queue_size", "1024",
+    "-thread_queue_size", "64",
     "-i", AUDIO_FIFO,
 
     "-c:v", VIDEO_CODEC,
@@ -301,13 +323,17 @@ function buildFFmpegArgs() {
     "-bufsize", "2000k",
     "-pix_fmt", "yuv420p",
     "-g", gop,
-    "-bf", "2",
+    "-bf", B_FRAMES,
   ];
 
   if (INTERLACED) args.push("-flags", "+ilme+ildct");
   if (VIDEO_CODEC === "libx264") args.push("-preset", "veryfast", "-tune", "zerolatency");
 
-  args.push("-vf", `setsar=${SAR}`);
+  // Tag field order explicitly. Without setfield, mpeg2video sometimes
+  // marks output as bottom-first even on progressive input, which makes
+  // bob-deinterlacing players flicker.
+  const fieldTag = INTERLACED ? "tff" : "prog";
+  args.push("-vf", `setsar=${SAR},setfield=${fieldTag}`);
 
   // Output audio at 48 kHz regardless of input — ffmpeg resamples 44100→48000.
   args.push("-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE, "-ar", "48000", "-ac", "2");
@@ -324,7 +350,14 @@ function buildFFmpegArgs() {
       `${HLS_DIR}/stream.m3u8`,
     );
   } else {
-    args.push("-f", "mpegts", "pipe:1");
+    args.push(
+      "-flush_packets", "1",
+      "-f", "mpegts",
+      "-mpegts_flags", "+resend_headers",
+      "-muxdelay", "0",
+      "-muxpreload", "0",
+      "pipe:1",
+    );
   }
 
   return args;
@@ -365,8 +398,8 @@ function startFFmpeg() {
   setImmediate(() => {
     if (videoFifoWriter) { try { videoFifoWriter.destroy(); } catch {} }
     if (audioFifoWriter) { try { audioFifoWriter.destroy(); } catch {} }
-    videoFifoWriter = fs.createWriteStream(VIDEO_FIFO);
-    audioFifoWriter = fs.createWriteStream(AUDIO_FIFO);
+    videoFifoWriter = fs.createWriteStream(VIDEO_FIFO, { highWaterMark: VIDEO_FRAME_SIZE * 2 });
+    audioFifoWriter = fs.createWriteStream(AUDIO_FIFO, { highWaterMark: 44100 * 2 * 4 });
     videoFifoWriter.on("error", (e) => console.warn("[relay] video fifo error:", e.message));
     audioFifoWriter.on("error", (e) => console.warn("[relay] audio fifo error:", e.message));
     ffmpegReady = true;
@@ -609,16 +642,30 @@ function handleHTTPRequest(req, res) {
 function startServer() {
   const httpServer = http.createServer(handleHTTPRequest);
 
+  function fifoSink(getWriter) {
+    return {
+      write(chunk) {
+        const writer = getWriter();
+        if (!writer || writer.destroyed) return true;
+        return writer.write(chunk);
+      },
+      once(event, cb) {
+        const writer = getWriter();
+        if (!writer || writer.destroyed) {
+          setImmediate(cb);
+          return;
+        }
+        writer.once(event, cb);
+      },
+    };
+  }
+
   // Mount the raw-frame WS ingest endpoints (/ingest/video, /ingest/audio).
   // The sinks are tiny shims because the underlying fifo writers get recreated
   // on every ffmpeg restart, so we can't pass a fixed Writable here.
   mountIngest(httpServer, {
-    videoSink: {
-      write: (chunk) => { if (videoFifoWriter) videoFifoWriter.write(chunk); },
-    },
-    audioSink: {
-      write: (chunk) => { if (audioFifoWriter) audioFifoWriter.write(chunk); },
-    },
+    videoSink: fifoSink(() => videoFifoWriter),
+    audioSink: fifoSink(() => audioFifoWriter),
     expected: {
       width: parseInt(WIDTH, 10),
       height: parseInt(HEIGHT, 10),

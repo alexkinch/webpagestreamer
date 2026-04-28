@@ -8,19 +8,39 @@
 // the resolved profile); mismatched params are rejected at handshake.
 
 const { WebSocketServer } = require("ws");
-const url = require("node:url");
+
+const WS_OPEN = 1;
+const backpressureLogTimes = new Map();
+
+function logBackpressure(label) {
+  const now = Date.now();
+  const last = backpressureLogTimes.get(label) || 0;
+  if (now - last < 1000) return;
+  backpressureLogTimes.set(label, now);
+  console.log(`[ingest] paused ${label} websocket for sink backpressure`);
+}
+
+function writeWithBackpressure(ws, sink, data, label) {
+  const ok = sink.write(data);
+  if (ok !== false || !ws._socket || ws._socket.isPaused() || typeof sink.once !== "function") return;
+
+  ws._socket.pause();
+  sink.once("drain", () => {
+    if (ws.readyState === WS_OPEN && ws._socket) {
+      ws._socket.resume();
+    }
+  });
+  logBackpressure(label);
+}
 
 function mountIngest(httpServer, { videoSink, audioSink, expected, onVideoConnect, onAudioConnect }) {
   const wssVideo = new WebSocketServer({ noServer: true });
   const wssAudio = new WebSocketServer({ noServer: true });
 
-  // TODO(task-5): apply back-pressure when sink.write() returns false.
-  // The fifo writer can stall if ffmpeg is slow; without pausing the WS
-  // we'd buffer raw frames in memory at ~13 MiB/s for PAL.
   wssVideo.on("connection", (ws) => {
     console.log("[ingest] video client connected");
     if (onVideoConnect) onVideoConnect(true);
-    ws.on("message", (data) => videoSink.write(data));
+    ws.on("message", (data) => writeWithBackpressure(ws, videoSink, data, "video"));
     ws.on("close", () => {
       console.log("[ingest] video client disconnected");
       if (onVideoConnect) onVideoConnect(false);
@@ -31,7 +51,7 @@ function mountIngest(httpServer, { videoSink, audioSink, expected, onVideoConnec
   wssAudio.on("connection", (ws) => {
     console.log("[ingest] audio client connected");
     if (onAudioConnect) onAudioConnect(true);
-    ws.on("message", (data) => audioSink.write(data));
+    ws.on("message", (data) => writeWithBackpressure(ws, audioSink, data, "audio"));
     ws.on("close", () => {
       console.log("[ingest] audio client disconnected");
       if (onAudioConnect) onAudioConnect(false);
@@ -40,11 +60,11 @@ function mountIngest(httpServer, { videoSink, audioSink, expected, onVideoConnec
   });
 
   httpServer.on("upgrade", (req, socket, head) => {
-    const { pathname, query } = url.parse(req.url, true);
+    const { pathname, searchParams } = new URL(req.url, "ws://127.0.0.1");
     if (pathname === "/ingest/video") {
-      const w = parseInt(query.w, 10);
-      const h = parseInt(query.h, 10);
-      const fr = parseFloat(query.fr);
+      const w = parseInt(searchParams.get("w"), 10);
+      const h = parseInt(searchParams.get("h"), 10);
+      const fr = parseFloat(searchParams.get("fr"));
       if (w !== expected.width || h !== expected.height || fr !== expected.framerate) {
         console.warn(`[ingest] rejecting video upgrade: got ${w}x${h}@${fr} expected ${expected.width}x${expected.height}@${expected.framerate}`);
         socket.write("HTTP/1.1 400 Bad Request\r\n\r\n"); socket.destroy();
@@ -54,8 +74,8 @@ function mountIngest(httpServer, { videoSink, audioSink, expected, onVideoConnec
       return;
     }
     if (pathname === "/ingest/audio") {
-      const sr = parseInt(query.sr, 10);
-      const ch = parseInt(query.ch, 10);
+      const sr = parseInt(searchParams.get("sr"), 10);
+      const ch = parseInt(searchParams.get("ch"), 10);
       if (sr !== expected.sampleRate || ch !== expected.channels) {
         console.warn(`[ingest] rejecting audio upgrade: got ${sr}Hz×${ch} expected ${expected.sampleRate}Hz×${expected.channels}`);
         socket.write("HTTP/1.1 400 Bad Request\r\n\r\n"); socket.destroy();
