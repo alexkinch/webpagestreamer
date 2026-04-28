@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/alexkinch/webpagestreamer/compare/v0.2.2...v0.2.3) (2026-04-28)
+
+
+### Bug Fixes
+
+* **deps:** Bump alpine in the docker-dependencies group ([#21](https://github.com/alexkinch/webpagestreamer/issues/21)) ([1cee92f](https://github.com/alexkinch/webpagestreamer/commit/1cee92f16123be9846e25d8ee9eb51f6e50eed79))
+
 ## [0.2.2](https://github.com/alexkinch/webpagestreamer/compare/v0.2.1...v0.2.2) (2026-04-17)
 
 
