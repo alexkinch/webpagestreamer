@@ -1,15 +1,17 @@
-// WebSocket relay server: receives WebM chunks from the Chrome extension,
-// pipes them into FFmpeg (which encodes to MPEG-TS on stdout), and forwards
-// the MPEG-TS output to the configured destination (UDP, RTP, TCP, HTTP, or file).
+// Relay server: ingests raw I420 video frames + f32le audio chunks from the
+// Chrome extension over two WebSockets (see ./ingest.js for the wire protocol),
+// fans them through named pipes into ffmpeg, which encodes to MPEG-TS and
+// writes to the configured OUTPUT (UDP/RTP/TCP/HTTP/file).
 //
 // Also serves IPTV integration endpoints:
-//   GET /guide.xml   — XMLTV electronic programme guide
+//   GET /guide.xml    — XMLTV electronic programme guide
 //   GET /playlist.m3u — M3U playlist for IPTV clients
 //   GET /health       — stream health check
+//   GET /stream.ts    — progressive MPEG-TS (when OUTPUT=http)
 
 const http = require("http");
-const { spawn } = require("child_process");
-const { WebSocketServer } = require("ws");
+const { spawn, execFileSync } = require("child_process");
+const { mountIngest } = require("./ingest.js");
 const dgram = require("dgram");
 const net = require("net");
 const fs = require("fs");
@@ -24,6 +26,9 @@ const CHANNEL_ID = process.env.CHANNEL_ID || "webpagestreamer.1";
 const PROGRAMME_TITLE = process.env.PROGRAMME_TITLE || "Live Stream";
 const PROGRAMME_DESC = process.env.PROGRAMME_DESC || "";
 const STREAM_URL = process.env.STREAM_URL || "";
+
+const VIDEO_FIFO = "/tmp/video.fifo";
+const AUDIO_FIFO = "/tmp/audio.fifo";
 
 // ---------------------------------------------------------------------------
 // Encoding profiles — each bundles resolution, codec, and format defaults
@@ -88,7 +93,11 @@ const HLS_LIST_SIZE = process.env.HLS_LIST_SIZE || "5";
 let ffmpeg = null;
 let ffmpegReady = false;
 let outputHandler = null;
-let wsConnected = false;
+let videoIngestConnected = false;
+let audioIngestConnected = false;
+let videoFifoWriter = null;
+let audioFifoWriter = null;
+let pipesSetUp = false;
 
 // Clients connected to /stream.ts (populated when OUTPUT=http). Shared between
 // the HTTP request handler and the output handler's write() fan-out.
@@ -263,20 +272,31 @@ function createOutputHandler(outputStr) {
 }
 
 // ---------------------------------------------------------------------------
-// FFmpeg — encodes WebM to MPEG-TS, outputs on stdout
+// FFmpeg — encodes raw I420 video + f32le audio to MPEG-TS on stdout
 // ---------------------------------------------------------------------------
 
 function buildFFmpegArgs() {
   const gop = String(Math.round(parseFloat(FRAMERATE) / 2));
   const args = [
-    // Input: WebM from stdin. MediaRecorder timestamps jitter; stamp each
-    // chunk by arrival time so A/V stays locked to a stable clock.
-    "-use_wallclock_as_timestamps", "1",
-    "-i", "pipe:0",
-    // Video
-    "-c:v", VIDEO_CODEC,
+    "-fflags", "+genpts",
+
+    // Raw I420 video pipe — ffmpeg paces by -framerate.
+    "-f", "rawvideo",
+    "-pix_fmt", "yuv420p",
     "-s", `${WIDTH}x${HEIGHT}`,
-    "-r", FRAMERATE,
+    "-framerate", String(FRAMERATE),
+    "-thread_queue_size", "1024",
+    "-i", VIDEO_FIFO,
+
+    // Raw f32le audio pipe at 44.1 kHz (browser default). The encoder's
+    // -ar 48000 below makes ffmpeg resample on the fly.
+    "-f", "f32le",
+    "-ar", "44100",
+    "-ac", "2",
+    "-thread_queue_size", "1024",
+    "-i", AUDIO_FIFO,
+
+    "-c:v", VIDEO_CODEC,
     "-b:v", VIDEO_BITRATE,
     "-maxrate", VIDEO_BITRATE,
     "-bufsize", "2000k",
@@ -285,33 +305,16 @@ function buildFFmpegArgs() {
     "-bf", "2",
   ];
 
-  // Interlaced encoding flags (broadcast profiles)
-  if (INTERLACED) {
-    args.push("-flags", "+ilme+ildct");
-  }
+  if (INTERLACED) args.push("-flags", "+ilme+ildct");
+  if (VIDEO_CODEC === "libx264") args.push("-preset", "veryfast", "-tune", "zerolatency");
 
-  // H.264-specific tuning
-  if (VIDEO_CODEC === "libx264") {
-    args.push("-preset", "veryfast", "-tune", "zerolatency");
-  }
-
-  // Sample aspect ratio
   args.push("-vf", `setsar=${SAR}`);
 
-  // Audio. aresample=async=1000 continuously corrects drift up to 1s by
-  // stretching/compressing — replaces the deprecated single-shot "-async 1".
-  args.push(
-    "-c:a", AUDIO_CODEC,
-    "-b:a", AUDIO_BITRATE,
-    "-ar", "48000",
-    "-ac", "2",
-    "-af", "aresample=async=1000",
-  );
+  // Output audio at 48 kHz regardless of input — ffmpeg resamples 44100→48000.
+  args.push("-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE, "-ar", "48000", "-ac", "2");
 
-  // Sync: force constant frame rate so the MPEG-TS muxer gets predictable timing
   args.push("-fps_mode", "cfr");
 
-  // Output format
   if (FORMAT === "hls") {
     args.push(
       "-f", "hls",
@@ -328,10 +331,24 @@ function buildFFmpegArgs() {
   return args;
 }
 
+function setupPipes() {
+  for (const fifo of [VIDEO_FIFO, AUDIO_FIFO]) {
+    try { fs.unlinkSync(fifo); } catch {}
+    execFileSync("mkfifo", [fifo]);
+  }
+}
+
 function startFFmpeg() {
   // Ensure HLS output directory exists
   if (FORMAT === "hls") {
     fs.mkdirSync(HLS_DIR, { recursive: true });
+  }
+
+  // Create the named pipes once. Existing fifos still work across ffmpeg
+  // restarts — we just reattach a fresh writer below.
+  if (!pipesSetUp) {
+    setupPipes();
+    pipesSetUp = true;
   }
 
   const args = buildFFmpegArgs();
@@ -341,7 +358,18 @@ function startFFmpeg() {
   console.log(`[relay]   ${AUDIO_CODEC} ${AUDIO_BITRATE} 48kHz stereo`);
 
   ffmpeg = spawn("ffmpeg", args, {
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  // Open the fifo writers asynchronously so ffmpeg has a chance to open the
+  // read end first; otherwise createWriteStream() blocks waiting for a reader.
+  setImmediate(() => {
+    if (videoFifoWriter) { try { videoFifoWriter.destroy(); } catch {} }
+    if (audioFifoWriter) { try { audioFifoWriter.destroy(); } catch {} }
+    videoFifoWriter = fs.createWriteStream(VIDEO_FIFO);
+    audioFifoWriter = fs.createWriteStream(AUDIO_FIFO);
+    videoFifoWriter.on("error", (e) => console.warn("[relay] video fifo error:", e.message));
+    audioFifoWriter.on("error", (e) => console.warn("[relay] audio fifo error:", e.message));
   });
 
   ffmpegReady = true;
@@ -376,10 +404,6 @@ function startFFmpeg() {
     ffmpegReady = false;
     // Restart FFmpeg after a delay
     setTimeout(startFFmpeg, 2000);
-  });
-
-  ffmpeg.stdin.on("error", (err) => {
-    console.error("[relay] FFmpeg stdin error:", err.message);
   });
 }
 
@@ -551,12 +575,12 @@ function handleHTTPRequest(req, res) {
   }
 
   if (pathname === "/health") {
-    const healthy = ffmpegReady && wsConnected &&
-      (FORMAT === "hls" || outputHandler !== null);
+    const healthy = ffmpegReady && videoIngestConnected && audioIngestConnected
+      && (FORMAT === "hls" || outputHandler !== null);
     const body = JSON.stringify({
       status: healthy ? "healthy" : "unhealthy",
       ffmpeg: ffmpegReady,
-      websocket: wsConnected,
+      ingest: { video: videoIngestConnected, audio: audioIngestConnected },
       profile: PROFILE,
       format: FORMAT,
       output: FORMAT === "hls" ? `http://localhost:${WS_PORT}/stream/stream.m3u8` : OUTPUT,
@@ -577,36 +601,35 @@ function handleHTTPRequest(req, res) {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket + HTTP server
+// HTTP server + raw-frame ingest
 // ---------------------------------------------------------------------------
 
 function startServer() {
   const httpServer = http.createServer(handleHTTPRequest);
 
-  const wss = new WebSocketServer({ server: httpServer });
-
-  wss.on("connection", (socket) => {
-    console.log("[relay] extension connected");
-    wsConnected = true;
-
-    socket.on("message", (data, isBinary) => {
-      if (isBinary && ffmpegReady && ffmpeg && ffmpeg.stdin.writable) {
-        ffmpeg.stdin.write(Buffer.from(data));
-      }
-    });
-
-    socket.on("close", () => {
-      console.log("[relay] extension disconnected");
-      wsConnected = wss.clients.size > 0;
-    });
-
-    socket.on("error", (err) => {
-      console.error("[relay] WebSocket error:", err.message);
-    });
+  // Mount the raw-frame WS ingest endpoints (/ingest/video, /ingest/audio).
+  // The sinks are tiny shims because the underlying fifo writers get recreated
+  // on every ffmpeg restart, so we can't pass a fixed Writable here.
+  mountIngest(httpServer, {
+    videoSink: {
+      write: (chunk) => { if (videoFifoWriter) videoFifoWriter.write(chunk); },
+    },
+    audioSink: {
+      write: (chunk) => { if (audioFifoWriter) audioFifoWriter.write(chunk); },
+    },
+    expected: {
+      width: parseInt(WIDTH, 10),
+      height: parseInt(HEIGHT, 10),
+      framerate: parseFloat(FRAMERATE),
+      sampleRate: 44100,
+      channels: 2,
+    },
+    onVideoConnect: (b) => { videoIngestConnected = b; },
+    onAudioConnect: (b) => { audioIngestConnected = b; },
   });
 
   httpServer.listen(WS_PORT, () => {
-    console.log(`[relay] WebSocket + HTTP server listening on port ${WS_PORT}`);
+    console.log(`[relay] HTTP server listening on port ${WS_PORT}`);
     console.log(`[relay]   GET /guide.xml    — XMLTV programme guide`);
     console.log(`[relay]   GET /playlist.m3u — M3U playlist`);
     console.log(`[relay]   GET /health       — health check`);
