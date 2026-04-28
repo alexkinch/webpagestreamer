@@ -97,7 +97,6 @@ let videoIngestConnected = false;
 let audioIngestConnected = false;
 let videoFifoWriter = null;
 let audioFifoWriter = null;
-let pipesSetUp = false;
 
 // Clients connected to /stream.ts (populated when OUTPUT=http). Shared between
 // the HTTP request handler and the output handler's write() fan-out.
@@ -344,18 +343,16 @@ function startFFmpeg() {
     fs.mkdirSync(HLS_DIR, { recursive: true });
   }
 
-  // Create the named pipes once. Existing fifos still work across ffmpeg
-  // restarts — we just reattach a fresh writer below.
-  if (!pipesSetUp) {
-    setupPipes();
-    pipesSetUp = true;
-  }
+  // Recreate the named pipes on every spawn. The kernel pipe buffer can
+  // hold partial frames from a dead ffmpeg; reading them as if fresh would
+  // misalign rawvideo. unlink+mkfifo gives us a pristine fifo each life.
+  setupPipes();
 
   const args = buildFFmpegArgs();
 
   console.log(`[relay] starting FFmpeg → ${FORMAT === "hls" ? "HLS" : "stdout"} (profile: ${PROFILE})`);
   console.log(`[relay]   ${VIDEO_CODEC} ${WIDTH}x${HEIGHT}@${FRAMERATE}fps SAR ${SAR}${INTERLACED ? " interlaced" : ""}`);
-  console.log(`[relay]   ${AUDIO_CODEC} ${AUDIO_BITRATE} 48kHz stereo`);
+  console.log(`[relay]   ${AUDIO_CODEC} ${AUDIO_BITRATE} 48kHz stereo (in: 44.1 kHz)`);
 
   ffmpeg = spawn("ffmpeg", args, {
     stdio: ["ignore", "pipe", "pipe"],
@@ -363,6 +360,8 @@ function startFFmpeg() {
 
   // Open the fifo writers asynchronously so ffmpeg has a chance to open the
   // read end first; otherwise createWriteStream() blocks waiting for a reader.
+  // ffmpegReady is set inside this callback so writes from the ingest WS
+  // can't race ahead of valid writers.
   setImmediate(() => {
     if (videoFifoWriter) { try { videoFifoWriter.destroy(); } catch {} }
     if (audioFifoWriter) { try { audioFifoWriter.destroy(); } catch {} }
@@ -370,9 +369,8 @@ function startFFmpeg() {
     audioFifoWriter = fs.createWriteStream(AUDIO_FIFO);
     videoFifoWriter.on("error", (e) => console.warn("[relay] video fifo error:", e.message));
     audioFifoWriter.on("error", (e) => console.warn("[relay] audio fifo error:", e.message));
+    ffmpegReady = true;
   });
-
-  ffmpegReady = true;
 
   // Forward MPEG-TS output to the configured destination (non-HLS only)
   ffmpeg.stdout.on("data", (chunk) => {
@@ -397,11 +395,15 @@ function startFFmpeg() {
   ffmpeg.on("error", (err) => {
     console.error("[relay] FFmpeg process error:", err.message);
     ffmpegReady = false;
+    videoFifoWriter = null;
+    audioFifoWriter = null;
   });
 
   ffmpeg.on("exit", (code, signal) => {
     console.log(`[relay] FFmpeg exited: code=${code} signal=${signal}`);
     ffmpegReady = false;
+    videoFifoWriter = null;
+    audioFifoWriter = null;
     // Restart FFmpeg after a delay
     setTimeout(startFFmpeg, 2000);
   });
