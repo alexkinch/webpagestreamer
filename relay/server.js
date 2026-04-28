@@ -21,11 +21,8 @@
 const http = require("http");
 const { spawn, execFileSync } = require("child_process");
 const { mountIngest } = require("./ingest.js");
-const dgram = require("dgram");
-const net = require("net");
 const fs = require("fs");
 const url = require("url");
-const crypto = require("crypto");
 
 const WS_PORT = parseInt(process.env.WS_PORT || "9000", 10);
 const OUTPUT = process.env.OUTPUT || "udp://239.0.0.1:1234?pkt_size=1316";
@@ -95,158 +92,10 @@ const INTERLACED = process.env.INTERLACED
   : baseProfile.interlaced;
 let ffmpeg = null;
 let ffmpegReady = false;
-let outputHandler = null;
 let videoIngestConnected = false;
 let audioIngestConnected = false;
 let videoFifoWriter = null;
 let audioFifoWriter = null;
-
-// ---------------------------------------------------------------------------
-// Output handlers — FFmpeg writes MPEG-TS to stdout, we forward it here
-// ---------------------------------------------------------------------------
-
-function createTSPacketizer(sendPayload) {
-  const TS_PACKET_SIZE = 188;
-  const MAX_PAYLOAD_SIZE = TS_PACKET_SIZE * 7;
-  let carry = Buffer.alloc(0);
-
-  return {
-    write(chunk) {
-      const data = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk;
-      const alignedLength = data.length - (data.length % TS_PACKET_SIZE);
-      for (let i = 0; i < alignedLength; i += MAX_PAYLOAD_SIZE) {
-        sendPayload(data.subarray(i, Math.min(i + MAX_PAYLOAD_SIZE, alignedLength)));
-      }
-      carry = data.subarray(alignedLength);
-    },
-  };
-}
-
-function parseOutput(outputStr) {
-  // UDP:  udp://host:port?opts
-  // RTP:  rtp://host:port   (MPEG-TS over RTP, RFC 2250, PT=33)
-  // TCP:  tcp://host:port?opts
-  // File: /path/to/file.ts
-  if (outputStr.startsWith("udp://")) {
-    const parsed = new URL(outputStr);
-    return { type: "udp", host: parsed.hostname, port: parseInt(parsed.port, 10) };
-  }
-  if (outputStr.startsWith("rtp://")) {
-    const parsed = new URL(outputStr);
-    return { type: "rtp", host: parsed.hostname, port: parseInt(parsed.port, 10) };
-  }
-  if (outputStr.startsWith("tcp://")) {
-    const parsed = new URL(outputStr);
-    return { type: "tcp", host: parsed.hostname, port: parseInt(parsed.port, 10) };
-  }
-  // Assume file path
-  return { type: "file", path: outputStr };
-}
-
-function createOutputHandler(outputStr) {
-  const config = parseOutput(outputStr);
-
-  if (config.type === "udp") {
-    const socket = dgram.createSocket("udp4");
-    // Enable multicast if it's a multicast address (224.0.0.0 - 239.255.255.255)
-    const firstOctet = parseInt(config.host.split(".")[0], 10);
-    if (firstOctet >= 224 && firstOctet <= 239) {
-      socket.bind(0, () => {
-        socket.setMulticastTTL(4);
-      });
-    }
-    console.log(`[output] UDP → ${config.host}:${config.port}`);
-    const packetizer = createTSPacketizer((payload) => {
-      socket.send(payload, config.port, config.host);
-    });
-    return {
-      write(chunk) {
-        packetizer.write(chunk);
-      },
-      close() {
-        socket.close();
-      },
-    };
-  }
-
-  if (config.type === "rtp") {
-    // MPEG-TS over RTP per RFC 2250: 12-byte RTP header + up to 7 TS packets.
-    const socket = dgram.createSocket("udp4");
-    const firstOctet = parseInt(config.host.split(".")[0], 10);
-    if (firstOctet >= 224 && firstOctet <= 239) {
-      socket.bind(0, () => {
-        socket.setMulticastTTL(4);
-      });
-    }
-    const ssrc = crypto.randomBytes(4).readUInt32BE(0);
-    let seq = crypto.randomBytes(2).readUInt16BE(0);
-    console.log(`[output] RTP → ${config.host}:${config.port} (PT=33, SSRC=0x${ssrc.toString(16)})`);
-    const packetizer = createTSPacketizer((payload) => {
-      const header = Buffer.alloc(12);
-      header[0] = 0x80;           // V=2, P=0, X=0, CC=0
-      header[1] = 33;             // M=0, PT=33 (MP2T)
-      header.writeUInt16BE(seq & 0xffff, 2);
-      // 90 kHz wall-clock timestamp; wraps naturally at u32
-      header.writeUInt32BE(((Date.now() * 90) >>> 0), 4);
-      header.writeUInt32BE(ssrc, 8);
-      seq = (seq + 1) & 0xffff;
-      socket.send(Buffer.concat([header, payload]), config.port, config.host);
-    });
-    return {
-      write(chunk) {
-        packetizer.write(chunk);
-      },
-      close() {
-        socket.close();
-      },
-    };
-  }
-
-  if (config.type === "tcp") {
-    const clients = new Set();
-    const server = net.createServer((socket) => {
-      console.log(`[output] TCP client connected: ${socket.remoteAddress}:${socket.remotePort}`);
-      clients.add(socket);
-      socket.on("close", () => {
-        console.log(`[output] TCP client disconnected`);
-        clients.delete(socket);
-      });
-      socket.on("error", (err) => {
-        console.error(`[output] TCP client error: ${err.message}`);
-        clients.delete(socket);
-      });
-    });
-    server.listen(config.port, config.host, () => {
-      console.log(`[output] TCP server listening on ${config.host}:${config.port}`);
-    });
-    return {
-      write(chunk) {
-        for (const client of clients) {
-          if (!client.destroyed) {
-            client.write(chunk);
-          }
-        }
-      },
-      close() {
-        for (const client of clients) client.destroy();
-        server.close();
-      },
-    };
-  }
-
-  if (config.type === "file") {
-    const stream = fs.createWriteStream(config.path);
-    console.log(`[output] File → ${config.path}`);
-    return {
-      write(chunk) {
-        stream.write(chunk);
-      },
-      close() {
-        stream.end();
-      },
-    };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // FFmpeg — encodes raw I420 video + f32le audio to MPEG-TS on stdout
@@ -295,17 +144,25 @@ function buildFFmpegArgs() {
   args.push("-vf", `setsar=${SAR},setfield=${fieldTag}`);
 
   // Output audio at 48 kHz regardless of input — ffmpeg resamples 44100→48000.
+  // aresample=async=1000 continuously stretches/compresses audio (up to 1000
+  // samples per chunk) to track the video's clock. Without this the two
+  // declared rates (44.1 kHz audio, 25 fps video) drift relative to each
+  // other because the browser's compositor isn't a metronome — measured 2%
+  // divergence over 10 s with the BBC sync test.
   args.push("-c:a", AUDIO_CODEC, "-b:a", AUDIO_BITRATE, "-ar", "48000", "-ac", "2");
+  args.push("-af", "aresample=async=1000");
 
   args.push("-fps_mode", "cfr");
 
+  // ffmpeg writes the MPEG-TS directly to the OUTPUT URL — no Node in the
+  // hot path. Native ffmpeg protocols handle udp / rtp / tcp / file.
   args.push(
     "-flush_packets", "1",
     "-f", "mpegts",
     "-mpegts_flags", "+resend_headers",
     "-muxdelay", "0",
     "-muxpreload", "0",
-    "pipe:1",
+    OUTPUT,
   );
 
   return args;
@@ -326,12 +183,12 @@ function startFFmpeg() {
 
   const args = buildFFmpegArgs();
 
-  console.log(`[relay] starting FFmpeg → MPEG-TS on stdout (profile: ${PROFILE})`);
+  console.log(`[relay] starting FFmpeg → ${OUTPUT} (profile: ${PROFILE})`);
   console.log(`[relay]   ${VIDEO_CODEC} ${WIDTH}x${HEIGHT}@${FRAMERATE}fps SAR ${SAR}${INTERLACED ? " interlaced" : ""}`);
   console.log(`[relay]   ${AUDIO_CODEC} ${AUDIO_BITRATE} 48kHz stereo (in: 44.1 kHz)`);
 
   ffmpeg = spawn("ffmpeg", args, {
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
   // Open the fifo writers asynchronously so ffmpeg has a chance to open the
@@ -346,11 +203,6 @@ function startFFmpeg() {
     videoFifoWriter.on("error", (e) => console.warn("[relay] video fifo error:", e.message));
     audioFifoWriter.on("error", (e) => console.warn("[relay] audio fifo error:", e.message));
     ffmpegReady = true;
-  });
-
-  // Forward MPEG-TS output to the configured destination
-  ffmpeg.stdout.on("data", (chunk) => {
-    if (outputHandler) outputHandler.write(chunk);
   });
 
   ffmpeg.stderr.on("data", (data) => {
@@ -488,8 +340,7 @@ function handleHTTPRequest(req, res) {
   }
 
   if (pathname === "/health") {
-    const healthy = ffmpegReady && videoIngestConnected && audioIngestConnected
-      && outputHandler !== null;
+    const healthy = ffmpegReady && videoIngestConnected && audioIngestConnected;
     const body = JSON.stringify({
       status: healthy ? "healthy" : "unhealthy",
       ffmpeg: ffmpegReady,
@@ -560,6 +411,5 @@ function startServer() {
 // Start everything
 // ---------------------------------------------------------------------------
 
-outputHandler = createOutputHandler(OUTPUT);
 startFFmpeg();
 startServer();

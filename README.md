@@ -43,7 +43,7 @@ docker build -t webpagestreamer .
 # Stream over TCP (one-client testing)
 docker run --rm -p 9876:9876 \
   -e URL="https://example.com" \
-  -e OUTPUT="tcp://0.0.0.0:9876" \
+  -e OUTPUT="tcp://0.0.0.0:9876?listen=1" \
   webpagestreamer
 
 # Then in another terminal:
@@ -77,13 +77,16 @@ IPTV metadata: `CHANNEL_NAME`, `CHANNEL_ID`, `PROGRAMME_TITLE`, `PROGRAMME_DESC`
 
 ## OUTPUT modes
 
-### TCP (recommended for local testing)
+### TCP
 
-The container runs a TCP server on the configured port. One concurrent client; subsequent connects share the live stream.
+ffmpeg owns the socket directly — no Node middleman. Two modes:
+
+- `tcp://0.0.0.0:9876?listen=1` — ffmpeg binds and waits for one client to connect, then streams. Single concurrent client; once it disconnects, ffmpeg exits and supervisord restarts (which reopens the listen socket).
+- `tcp://<host>:<port>` (no `?listen=1`) — ffmpeg dials out to that address. Use this for a downstream server that accepts incoming TCP MPEG-TS.
 
 ```bash
 docker run --rm -p 9876:9876 \
-  -e OUTPUT="tcp://0.0.0.0:9876" webpagestreamer
+  -e OUTPUT="tcp://0.0.0.0:9876?listen=1" webpagestreamer
 ffplay -f mpegts tcp://127.0.0.1:9876
 ```
 

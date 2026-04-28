@@ -20,7 +20,7 @@ echo ""
 # Start container in background
 CONTAINER_ID=$(docker run -d --rm -p "${PORT}:${PORT}" \
   -e URL="$URL" \
-  -e OUTPUT="tcp://0.0.0.0:${PORT}" \
+  -e OUTPUT="tcp://0.0.0.0:${PORT}?listen=1" \
   "$IMAGE")
 
 echo "Container: $CONTAINER_ID"
