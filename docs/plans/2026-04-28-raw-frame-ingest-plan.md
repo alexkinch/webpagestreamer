@@ -17,12 +17,18 @@ Chromium tab
                                                                    ▼
 relay/server.js
   ├── WS  /ingest/video  → write each I420 frame to /tmp/video.fifo
-  ├── WS  /ingest/audio  → write each s16le chunk to /tmp/audio.fifo
+  ├── WS  /ingest/audio  → write each f32le chunk to /tmp/audio.fifo
   └── ffmpeg
         -f rawvideo -pix_fmt yuv420p -s WxH -framerate FR -i /tmp/video.fifo
-        -f s16le    -ar 48000 -ac 2                       -i /tmp/audio.fifo
+        -f f32le    -ar 44100 -ac 2                       -i /tmp/audio.fifo
         ... encode → MPEG-TS → HTTP /stream.ts and/or UDP multicast
 ```
+
+**Spike-confirmed values (Task 1 already run, 2026-04-28):**
+- `MediaStreamTrackProcessor` is available in headless Chromium 138 with no flag.
+- `VideoFrame.format === "I420"` for tabCapture-sourced video (`coded=720x576` for PAL profile).
+- `AudioData.format === "f32-planar"`, `sampleRate === 44100`, `numberOfChannels === 2` for tabCapture-sourced audio. We convert to interleaved f32 via `copyTo({format: "f32"})` for ffmpeg's `-f f32le`.
+- Encoder still outputs 48 kHz audio (`-ar 48000` on the output side); ffmpeg resamples 44100 → 48000 internally.
 
 **Why this fixes both drift and quality:**
 - Each `VideoFrame` and `AudioData` carries its own source-clock timestamp, but ffmpeg re-clocks both inputs deterministically via `-framerate` / `-ar`. Because both raw streams come from the same browser process and are fed unbuffered, A/V stays locked.
@@ -89,7 +95,21 @@ git push -u origin feat/raw-frame-ingest
 
 ---
 
-## Task 1 — Spike: confirm `MediaStreamTrackProcessor` works in headless Chromium and produces I420
+## Task 1 — Spike: confirm `MediaStreamTrackProcessor` works in headless Chromium and produces I420 ✅ done
+
+**Outcome (2026-04-28):** Verified by running on `feat/raw-frame-ingest` (image built from main + spike probe). Logs from chromium showed:
+
+```
+[spike] MediaStreamTrackProcessor = function
+[spike] VIDEO format=I420 coded=720x576 ts=441168537815
+[spike] AUDIO format=f32-planar sr=44100 ch=2 frames=441
+```
+
+Conclusions baked into the plan:
+- I420 video, no flag needed.
+- f32-planar audio at **44.1 kHz**, not 48 kHz. Plan updated to ship f32le interleaved over the wire and let ffmpeg resample on the encoder side.
+
+The original spike instructions are kept below for reference only.
 
 **Goal:** Before rewriting anything, prove that headless Chromium 138 (Alpine 3.21 default) exposes `MediaStreamTrackProcessor` against a `tabCapture` stream and that `VideoFrame.format` is `I420`. If it isn't, we need a `--enable-blink-features` flag or a format conversion path, and the rest of the plan changes.
 
@@ -135,8 +155,8 @@ Document the exact message format both sides agree on. The next two tasks implem
 - **Two WebSocket connections.** Each carries one media type. Backpressure on video doesn't stall audio.
 - **One WS message = one media unit.** No framing inside the message — WS already frames binary messages.
 - **Video** message body = raw I420 frame bytes, planes concatenated in order Y, U, V. Length = `width * height * 3 / 2`.
-- **Audio** message body = raw `s16le` interleaved stereo, 48 kHz, variable length (whatever `numberOfFrames` the browser produced × 2 channels × 2 bytes).
-- **Connection negotiation:** the extension connects once at startup with query params: `/ingest/video?w=720&h=576&fr=25` and `/ingest/audio?sr=48000&ch=2`. The relay validates and refuses anything else. No per-frame headers.
+- **Audio** message body = raw `f32le` interleaved stereo, **44.1 kHz** (browser default; encoder resamples to 48 kHz). Length = `numberOfFrames × 2 channels × 4 bytes`.
+- **Connection negotiation:** the extension connects once at startup with query params: `/ingest/video?w=720&h=576&fr=25` and `/ingest/audio?sr=44100&ch=2`. The relay validates and refuses anything else. No per-frame headers.
 - **Reconnect:** if either WS closes, the extension waits 2 s and reconnects. Simple, idempotent.
 
 Add this as a code comment at the top of `relay/ingest.js` and `extension/content.js` so the next reader doesn't have to grep for it.
@@ -186,12 +206,12 @@ test("video and audio WS messages are forwarded to their sinks in order", async 
   const a = collector();
 
   const httpServer = http.createServer();
-  mountIngest(httpServer, { videoSink: v.sink, audioSink: a.sink, expected: { width: 4, height: 4, framerate: 25, sampleRate: 48000, channels: 2 } });
+  mountIngest(httpServer, { videoSink: v.sink, audioSink: a.sink, expected: { width: 4, height: 4, framerate: 25, sampleRate: 44100, channels: 2 } });
   await new Promise((r) => httpServer.listen(0, r));
   const port = httpServer.address().port;
 
   const vws = new WebSocket(`ws://127.0.0.1:${port}/ingest/video?w=4&h=4&fr=25`);
-  const aws = new WebSocket(`ws://127.0.0.1:${port}/ingest/audio?sr=48000&ch=2`);
+  const aws = new WebSocket(`ws://127.0.0.1:${port}/ingest/audio?sr=44100&ch=2`);
   await Promise.all([
     new Promise((r) => vws.once("open", r)),
     new Promise((r) => aws.once("open", r)),
@@ -221,9 +241,8 @@ test("video WS connection is rejected on dimension mismatch", async () => {
   const port = httpServer.address().port;
 
   const vws = new WebSocket(`ws://127.0.0.1:${port}/ingest/video?w=1280&h=720&fr=25`);
-  const closed = new Promise((r) => vws.once("close", (code) => r(code)));
-  const code = await closed;
-  assert.notStrictEqual(code, 1000);
+  // Server should reject the upgrade with HTTP 400 — ws emits 'unexpected-response'.
+  await new Promise((r) => vws.once("unexpected-response", () => { vws.terminate(); r(); }));
 
   await new Promise((r) => httpServer.close(r));
 });
@@ -342,9 +361,10 @@ function buildArgs(profile) {
     "-thread_queue_size", "1024",
     "-i", VIDEO_FIFO,
 
-    // Raw s16le audio pipe — ffmpeg paces by -ar / -ac.
-    "-f", "s16le",
-    "-ar", "48000",
+    // Raw f32le audio pipe at 44.1 kHz (browser default). The encoder's
+    // -ar 48000 below makes ffmpeg resample on the fly.
+    "-f", "f32le",
+    "-ar", "44100",
     "-ac", "2",
     "-thread_queue_size", "1024",
     "-i", AUDIO_FIFO,
@@ -362,7 +382,9 @@ function buildArgs(profile) {
   if (profile.videoCodec === "libx264") args.push("-preset", "veryfast", "-tune", "zerolatency");
 
   args.push("-vf", `setsar=${profile.sar}`);
-  args.push("-c:a", profile.audioCodec, "-b:a", profile.audioBitrate);
+  // Output audio at 48 kHz regardless of input rate — ffmpeg resamples
+  // 44100 → 48000 via swresample.
+  args.push("-c:a", profile.audioCodec, "-b:a", profile.audioBitrate, "-ar", "48000", "-ac", "2");
   args.push("-fps_mode", "cfr");
 
   if (profile.format === "hls") {
@@ -450,7 +472,7 @@ mountIngest(server, {
     width: profile.width,
     height: profile.height,
     framerate: parseFloat(profile.framerate),
-    sampleRate: 48000,
+    sampleRate: 44100,
     channels: 2,
   },
 });
@@ -513,8 +535,8 @@ git commit -m "feat(relay): pipe WS ingest into ffmpeg fifos; replace mediamtx h
 //   MediaStreamTrackProcessor(audio) → AudioData stream → s16le bytes → WS /ingest/audio
 //
 // Wire protocol (per-message, no inner framing):
-//   video: width*height*3/2 bytes, planes Y U V concatenated
-//   audio: variable-length s16le interleaved stereo at 48kHz
+//   video: width*height*3/2 bytes, planes Y U V concatenated (I420)
+//   audio: variable-length f32le interleaved stereo at 44.1 kHz
 
 (function () {
   let stopped = false;
@@ -627,9 +649,10 @@ git commit -m "feat(relay): pipe WS ingest into ffmpeg fifos; replace mediamtx h
       if (done) break;
       try {
         const samples = chunk.numberOfFrames * chunk.numberOfChannels;
-        const buf = new Int16Array(samples);
-        // Request interleaved s16. Chrome supports format conversion in copyTo.
-        chunk.copyTo(buf, { planeIndex: 0, format: "s16" });
+        const buf = new Float32Array(samples);
+        // Request interleaved f32 — matches what CEF gives OBS, and ffmpeg
+        // reads it as -f f32le -ac 2.
+        chunk.copyTo(buf, { planeIndex: 0, format: "f32" });
         ws.send(buf.buffer);
       } finally {
         chunk.close();
@@ -653,7 +676,7 @@ git commit -m "feat(relay): pipe WS ingest into ffmpeg fifos; replace mediamtx h
     const aTrack = stream.getAudioTracks()[0];
 
     const vURL = `ws://${relayHost}/ingest/video?w=${width}&h=${height}&fr=${framerate}`;
-    const aURL = `ws://${relayHost}/ingest/audio?sr=48000&ch=2`;
+    const aURL = `ws://${relayHost}/ingest/audio?sr=44100&ch=2`;
 
     const [vWS, aWS] = await Promise.all([openWS(vURL), openWS(aURL)]);
     console.log("[capture] WS connections established; pumping frames");
