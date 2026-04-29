@@ -381,6 +381,12 @@
       return;
     }
     captureStarting = false;
+    for (const track of stream.getVideoTracks()) {
+      console.log("[capture] video track settings", JSON.stringify(track.getSettings()));
+    }
+    for (const track of stream.getAudioTracks()) {
+      console.log("[capture] audio track settings", JSON.stringify(track.getSettings()));
+    }
 
     const mode = captureMode === "raw" ? "raw" : "webm";
     if (mode === "webm") {
@@ -416,11 +422,11 @@
     ) {
       const width = event.data.width || 720;
       const height = event.data.height || 576;
-      const framerate = event.data.framerate || 25;
+      const captureMode = String(event.data.captureMode || "webm").toLowerCase();
+      const framerate = event.data.framerate || (captureMode === "webm" ? 60 : 25);
       const relayHost =
         event.data.relayHost ||
         (event.data.port ? `127.0.0.1:${event.data.port}` : "127.0.0.1:9000");
-      const captureMode = String(event.data.captureMode || "webm").toLowerCase();
       startCapture({ width, height, framerate, relayHost, captureMode });
     }
   });

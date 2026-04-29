@@ -7,7 +7,7 @@ services:
       - PROFILE=pal                # pal | ntsc | 720p | 1080p
       # - WIDTH=720                # Override profile resolution
       # - HEIGHT=576
-      # - FRAMERATE=25
+      # - FRAMERATE=60
       # IPTV integration (XMLTV guide, M3U playlist, health check)
       - CHANNEL_NAME=WebPageStreamer
       - CHANNEL_ID=webpagestreamer.1

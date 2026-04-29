@@ -67,7 +67,7 @@ DURATION=60 ./test.sh
 | `PROFILE`   | `pal`                    | Encoding profile (`pal`, `ntsc`, `720p`, `1080p`) |
 | `WIDTH`     | from profile             | Capture width in pixels                  |
 | `HEIGHT`    | from profile             | Capture height in pixels                 |
-| `FRAMERATE` | from profile             | Frames per second                        |
+| `FRAMERATE` | `60` for `webm`, from profile for `raw` | Output frames per second; explicit env override always wins |
 | `WS_PORT`   | `9000`                   | Port for IPTV metadata endpoints + WS ingest |
 | `CDP_PORT`  | `9222`                   | Chrome DevTools Protocol port (internal) |
 | `INGEST_MODE` | `webm`               | Relay ingest: `webm` (muxed, recommended) or `raw` (dual I420+PCM) |
@@ -200,7 +200,7 @@ For broadcast PAL specifically (interlaced 25i), set `INTERLACED=true`. Default 
   ```
 
 **FFmpeg / Chrome log noise**
-- One-line `mpeg2video … impossible bitrate constraints` at startup often appears even when the encode is healthy; check that output video is **25 fps** (or your `FRAMERATE`) and `speed≈1` in progress lines.
+- One-line `mpeg2video … impossible bitrate constraints` at startup often appears even when the encode is healthy; check that output video matches `FRAMERATE` and `speed≈1` in progress lines.
 - DBus, ALSA, GCM, Vulkan messages from headless Chrome in Docker are usually harmless.
 
 **A/V sync or pitch in ffplay**
