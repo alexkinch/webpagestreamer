@@ -31,6 +31,9 @@ const CHANNEL_ID = process.env.CHANNEL_ID || "webpagestreamer.1";
 const PROGRAMME_TITLE = process.env.PROGRAMME_TITLE || "Live Stream";
 const PROGRAMME_DESC = process.env.PROGRAMME_DESC || "";
 const STREAM_URL = process.env.STREAM_URL || "";
+// webm = single muxed MediaRecorder stream (A/V timestamps from Chrome). raw =
+// legacy dual WebSocket I420 + PCM (no shared timeline — drifts under load).
+const INGEST_MODE = (process.env.INGEST_MODE || "webm").toLowerCase();
 
 const VIDEO_FIFO = "/tmp/video.fifo";
 const AUDIO_FIFO = "/tmp/audio.fifo";
@@ -79,7 +82,7 @@ if (!PROFILES[PROFILE]) {
 // Environment overrides take precedence over profile defaults
 const WIDTH = process.env.WIDTH || String(baseProfile.width);
 const HEIGHT = process.env.HEIGHT || String(baseProfile.height);
-const FRAMERATE = process.env.FRAMERATE || String(baseProfile.framerate);
+const FRAMERATE = process.env.FRAMERATE || (INGEST_MODE === "webm" ? "60" : String(baseProfile.framerate));
 const VIDEO_FRAME_SIZE = parseInt(WIDTH, 10) * parseInt(HEIGHT, 10) * 3 / 2;
 const VIDEO_CODEC = process.env.VIDEO_CODEC || baseProfile.videoCodec;
 const AUDIO_CODEC = process.env.AUDIO_CODEC || baseProfile.audioCodec;
@@ -90,9 +93,6 @@ const SAR = process.env.SAR || baseProfile.sar;
 const INTERLACED = process.env.INTERLACED
   ? process.env.INTERLACED === "true"
   : baseProfile.interlaced;
-// webm = single muxed MediaRecorder stream (A/V timestamps from Chrome). raw =
-// legacy dual WebSocket I420 + PCM (no shared timeline — drifts under load).
-const INGEST_MODE = (process.env.INGEST_MODE || "webm").toLowerCase();
 let ffmpeg = null;
 let ffmpegReady = false;
 let videoIngestConnected = false;

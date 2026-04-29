@@ -13,6 +13,8 @@ CHANNEL_ID="${CHANNEL_ID:-webpagestreamer.1}"
 PROGRAMME_TITLE="${PROGRAMME_TITLE:-Live Stream}"
 PROGRAMME_DESC="${PROGRAMME_DESC:-}"
 STREAM_URL="${STREAM_URL:-}"
+INGEST_MODE="${INGEST_MODE:-webm}"
+CAPTURE_MODE="${CAPTURE_MODE:-$INGEST_MODE}"
 
 # Resolve WIDTH/HEIGHT/FRAMERATE from profile if not explicitly set
 case "$PROFILE" in
@@ -25,13 +27,19 @@ case "$PROFILE" in
 esac
 WIDTH="${WIDTH:-$_W}"
 HEIGHT="${HEIGHT:-$_H}"
-FRAMERATE="${FRAMERATE:-$_F}"
+if [ -z "${FRAMERATE+x}" ]; then
+    if [ "$INGEST_MODE" = "webm" ]; then
+        # Chrome's MediaRecorder/tabCapture path commonly emits 60fps WebM even
+        # when lower frame-rate constraints are requested. Match that clock by
+        # default in WebM mode; raw mode keeps the profile's broadcast rate.
+        FRAMERATE=60
+    else
+        FRAMERATE="$_F"
+    fi
+fi
 
 EXTENSION_ID="akfimkeaknlnblgelnlelcgihcmconnb"
 EXTENSION_DIR="/app/extension"
-
-INGEST_MODE="${INGEST_MODE:-webm}"
-CAPTURE_MODE="${CAPTURE_MODE:-$INGEST_MODE}"
 
 export URL WIDTH HEIGHT FRAMERATE OUTPUT PROFILE WS_PORT CDP_PORT
 export CHANNEL_NAME CHANNEL_ID PROGRAMME_TITLE PROGRAMME_DESC STREAM_URL
