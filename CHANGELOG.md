@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/retrocabletv/webpagestreamer/compare/v0.3.0...v0.3.1) (2026-04-29)
+
+
+### Bug Fixes
+
+* make relay tests bind loopback ([#26](https://github.com/retrocabletv/webpagestreamer/issues/26)) ([b0d9060](https://github.com/retrocabletv/webpagestreamer/commit/b0d9060a7aa4410c3c626ecea9f7b7b4888a71ea))
+
 ## [0.3.0](https://github.com/alexkinch/webpagestreamer/compare/v0.2.3...v0.3.0) (2026-04-28)
 
 
