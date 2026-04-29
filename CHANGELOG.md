@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/alexkinch/webpagestreamer/compare/v0.2.3...v0.3.0) (2026-04-28)
+
+
+### Features
+
+* WebM mux ingest by default for stable A/V sync ([19c5201](https://github.com/alexkinch/webpagestreamer/commit/19c5201aae05022a9a6b70626eec3b9aac05551a))
+
 ## [0.2.3](https://github.com/alexkinch/webpagestreamer/compare/v0.2.2...v0.2.3) (2026-04-28)
 
 
