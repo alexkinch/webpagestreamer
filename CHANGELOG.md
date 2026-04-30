@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/retrocabletv/webpagestreamer/compare/v0.3.1...v0.3.2) (2026-04-30)
+
+
+### Bug Fixes
+
+* default WebM capture to 60fps ([#29](https://github.com/retrocabletv/webpagestreamer/issues/29)) ([f0df639](https://github.com/retrocabletv/webpagestreamer/commit/f0df63938dd0acc2608a9084a6d479338c33924e))
+
 ## [0.3.1](https://github.com/retrocabletv/webpagestreamer/compare/v0.3.0...v0.3.1) (2026-04-29)
 
 
