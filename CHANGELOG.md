@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.3](https://github.com/retrocabletv/webpagestreamer/compare/v0.3.2...v0.3.3) (2026-06-01)
+
+
+### Bug Fixes
+
+* **deps:** Bump ws in /relay in the relay-dependencies group ([#31](https://github.com/retrocabletv/webpagestreamer/issues/31)) ([2655be0](https://github.com/retrocabletv/webpagestreamer/commit/2655be019727aaec2af938fd861fddb9e6e2e508))
+* **deps:** Bump ws in /relay in the relay-dependencies group ([#33](https://github.com/retrocabletv/webpagestreamer/issues/33)) ([59cfdc7](https://github.com/retrocabletv/webpagestreamer/commit/59cfdc79ccf4653d577e26490d73df86401d2a74))
+
 ## [0.3.2](https://github.com/retrocabletv/webpagestreamer/compare/v0.3.1...v0.3.2) (2026-04-30)
 
 
